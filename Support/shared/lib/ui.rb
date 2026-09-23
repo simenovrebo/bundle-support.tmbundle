@@ -184,25 +184,12 @@ module TextMate
 
       # show a standard open file dialog
       def request_file(options = Hash.new,&block)
-        _options = default_options_for_cocoa_dialog(options)
-        _options["title"] = options[:title] || "Select File"
-        _options["informative-text"] = options[:prompt] || ""
-        _options["text"] = options[:default] || ""
-        _options["select-only-directories"] = "" if options[:only_directories]
-        _options["with-directory"] = options[:directory] if options[:directory]
-        cocoa_dialog("fileselect", _options,&block)
+        choose_file("Select File", false, options, &block)
       end
 
       # show a standard open file dialog, allowing multiple selections
       def request_files(options = Hash.new,&block)
-        _options = default_options_for_cocoa_dialog(options)
-        _options["title"] = options[:title] || "Select File(s)"
-        _options["informative-text"] = options[:prompt] || ""
-        _options["text"] = options[:default] || ""
-        _options["select-only-directories"] = "" if options[:only_directories]
-        _options["with-directory"] = options[:directory] if options[:directory]
-        _options["select-multiple"] = ""
-        cocoa_dialog("fileselect", _options,&block)
+        choose_file("Select File(s)", true, options, &block)
       end
 
       # Request an item from a list of items
@@ -354,41 +341,47 @@ module TextMate
         end
       end
 
-      def cocoa_dialog(type, options)
-        str = ""
-        options.each_pair do |key, value|
-          unless value.nil?
-            str << " --#{key.shellescape} "
-            str << Array(value).shelljoin
-          end
+      # common to request_file, request_files: returns an array of paths
+      def choose_file(default_title, multiple, options, &block)
+        prompt = [ options[:title] || default_title, options[:prompt] ].compact.reject(&:empty?).join("\n\n")
+        args   = [ prompt ]
+
+        command = options[:only_directories] ? 'choose folder' : 'choose file'
+        command << ' with prompt (item 1 of argv)'
+        if File.directory?(options[:directory].to_s)
+          command << ' default location (item 2 of argv)'
+          args << File.expand_path(options[:directory].to_s)
         end
-        result = %x{"$TM_SUPPORT_PATH/bin/CocoaDialog.app/Contents/MacOS/CocoaDialog" 2>/dev/console #{type.shellescape} #{str} --float}
-        result = result.to_a.map{|line| line.chomp}
-        if (type == "fileselect")
-          if result.length == 0
-            return_value = options['button2'] # simulate cancel
-          end
-        else
-          return_value, result = *result
+        command << ' with multiple selections allowed' if multiple
+
+        # user values are passed as arguments so they never need AppleScript escaping
+        script = <<-APPLESCRIPT
+          on run argv
+            if (count of argv) > 1 then set item 2 of argv to (POSIX file (item 2 of argv)) as alias
+            tell application "TextMate"
+              activate
+              set theResult to #{command}
+            end tell
+            set thePaths to {}
+            repeat with anItem in (theResult as list)
+              set end of thePaths to POSIX path of anItem
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            return thePaths as text
+          end run
+        APPLESCRIPT
+
+        result = ::IO.popen("osascript - #{args.shelljoin} 2>/dev/null", 'r+') do |io|
+          io << script; io.close_write
+          io.read
         end
-        if return_value == options["button2"] then
+        result = result.to_s.split("\n").reject(&:empty?).map { |path| path == '/' ? path : path.chomp('/') }
+
+        if result.empty? then # user cancelled
           block_given? ? raise(SystemExit) : nil
         else
           block_given? ? yield(result) : result
         end
-      end
-
-      def default_buttons(user_options = Hash.new)
-        options = Hash.new
-        options['button1'] = user_options[:button1] || "OK"
-        options['button2'] = user_options[:button2] || "Cancel"
-        options
-      end
-
-      def default_options_for_cocoa_dialog(user_options = Hash.new)
-        options = default_buttons(user_options)
-        options["string-output"] = ""
-        options
       end
 
     end
